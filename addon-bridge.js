@@ -2,22 +2,25 @@
  * addon-bridge.js  (host repo / addon repo 공통 · 동일 파일)
  *
  * 하나의 실제 Trial Insight UI(index.html)를 두 역할로 자동 분기한다.
- *   - HOST  모드 (최상위 창, Vercel = myTrial 대역): 사이드바 "Insight" 클릭 시
- *            inline 패널 대신 "다른 도메인 iframe"을 띄우고, 세션(projectId/userId)만
- *            postMessage 로 전달한다.  ← myTrial 이 실전에서 해야 하는 유일한 코드.
- *   - EMBED 모드 (iframe 안, GitHub Pages = addon): 사이드바/탑바를 숨기고 해당
- *            Insight 패널만 보여주며, 부모(myTrial)에서 postMessage 로 오는 세션을
- *            origin 검증 후 수신한다.  백엔드/토큰/쿠키/env 전혀 불필요.
  *
- * 핵심: 실전에서 myTrial 에 요구하는 것은 "iframe 삽입 + 아래 TI_SESSION postMessage
- *       한 조각"뿐. 서버 환경변수/토큰 API 세팅을 요구하지 않는다.
+ *  - HOST  모드 (최상위 창, Vercel = myTrial 대역):
+ *      · 세션(sessionStorage :SYSTEM:PROJECT:ID / USER:ID)과 쿠키(JSESSIONID) 보유
+ *      · 사이드바 "Insight" 클릭 → 콘텐츠 영역을 "다른 도메인 iframe"만으로 채움
+ *        (페이지 제목 / update 날짜 / 설명글 없음, 스크롤은 iframe 내부에서만)
+ *      · iframe 에 세션 + 쿠키를 postMessage 로 전달
+ *
+ *  - EMBED 모드 (iframe 안, GitHub Pages = addon):
+ *      · 사이드바 / 탑바 / 제목 / update 숨기고 Insight 뷰 콘텐츠만 표시
+ *      · 부모에서 온 세션 + 쿠키를 origin 검증 후 "검증"(형식 확인). 별도 배너 표시 없음.
+ *
+ * 실전에서 myTrial 에 요구하는 것은 "iframe 삽입 + 아래 postMessage 한 조각"뿐.
+ * (다른 도메인 iframe 은 부모 세션/쿠키에 직접 접근 불가 → postMessage 가 유일한 통로)
  * ==========================================================================*/
 (function () {
   'use strict';
 
   var qs = new URLSearchParams(location.search);
 
-  // addon(iframe) 위치. 로컬 테스트는 ?addon=http://localhost:5173/ 로 override.
   var ADDON_URL = 'https://hgjo-nanum.github.io/trialinsight-addon-sample-iframe/';
   if (qs.get('addon')) ADDON_URL = qs.get('addon');
   var ADDON_ORIGIN = new URL(ADDON_URL, location.href).origin;
@@ -40,14 +43,13 @@
   /* ===================== EMBED 모드 (addon, iframe 내부) ==================== */
   function initEmbed() {
     document.documentElement.setAttribute('data-embed', '1');
-    injectEmbedCss();
-    var banner = makeBanner();
+    injectEmbedCss(); // 사이드바/탑바/제목/update 숨김, 배너 없음
 
-    // origin 검증된 세션 컨텍스트 수신
+    // 부모(myTrial)가 보낸 세션 + 쿠키 수신 → origin 검증 → 형식 검증
     window.addEventListener('message', function (e) {
       if (HOST_ALLOWLIST.indexOf(e.origin) === -1) return; // 화이트리스트 밖 무시
       var d = e.data || {};
-      if (d.type === 'TI_SESSION') applySession(d, banner);
+      if (d.type === 'TI_SESSION') validateSession(d, e.origin);
       else if (d.type === 'TI_VIEW') gotoView(d.view);
     });
 
@@ -57,38 +59,26 @@
     gotoView(qs.get('view') || 'epro');
   }
 
+  function validateSession(ctx, origin) {
+    // 다른 도메인이므로 값은 postMessage 로만 도착. 여기서 검증한다.
+    var okProj = /^[A-Za-z]{1,4}\d{1,8}$/.test(ctx.projectId || '');
+    var okUser = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(ctx.userId || '');
+    var okSid  = /^[0-9A-Fa-f]{32}$/.test(ctx.jsessionid || '');
+    var valid  = okProj && okUser && okSid;
+    // 검증 결과 보관(실전에선 이 값들로 우리 addon 자체 데이터 조회/인증)
+    window.__TI_SESSION = { ctx: ctx, origin: origin, valid: valid, checks: { okProj: okProj, okUser: okUser, okSid: okSid } };
+    try {
+      console.debug('[TI addon] 세션/쿠키 수신·검증',
+        { origin: origin, projectId: ctx.projectId, userId: ctx.userId, jsessionid: ctx.jsessionid, valid: valid });
+    } catch (e) {}
+  }
+
   function gotoView(key) {
     if (INSIGHT_KEYS.indexOf(key) === -1) key = 'epro';
     var item = document.querySelector('.subnav-item[data-target="' + key + '"]');
     if (item) item.click(); // 원본 showPanel + 렌더 트리거
-    // 숨겨진 패널에 그려진 차트를 실제 크기로 다시 그리도록 resize 유도
     setTimeout(fireResize, 60);
     setTimeout(fireResize, 300);
-  }
-
-  function applySession(ctx, banner) {
-    // 실전에서는 이 projectId/userId 로 우리 addon 자체 데이터를 조회하면 됨.
-    banner.querySelector('[data-proj]').textContent = ctx.projectId || '-';
-    banner.querySelector('[data-user]').textContent = ctx.userId || '-';
-    banner.setAttribute('data-ok', '1');
-    // 실 서비스 느낌: 상단 계정 이메일도 수신값으로 교체(있으면)
-    var email = document.querySelector('.account .email');
-    if (email && ctx.userId) email.textContent = ctx.userId;
-  }
-
-  function makeBanner() {
-    var b = document.createElement('div');
-    b.id = 'ti-embed-banner';
-    b.innerHTML =
-      '<span class="dot"></span>' +
-      '<b>myTrial 세션 수신됨</b>' +
-      '<span class="sep">·</span>PROJECT <b data-proj>대기…</b>' +
-      '<span class="sep">·</span>USER <b data-user>대기…</b>' +
-      '<span class="via">postMessage · 다른 도메인 ' + location.origin + '</span>';
-    var main = document.querySelector('main');
-    if (main) main.insertBefore(b, main.firstChild);
-    else document.body.insertBefore(b, document.body.firstChild);
-    return b;
   }
 
   function injectEmbedCss() {
@@ -98,50 +88,49 @@
       'html[data-embed] .topbar{display:none!important;}' +
       'html[data-embed] .language,html[data-embed] [class*="lang"]{display:none!important;}' +
       'html[data-embed] .language::after{content:none!important;display:none!important;}' +
-      'html[data-embed] main{padding-top:14px!important;}' +
-      '#ti-embed-banner{display:flex;align-items:center;gap:8px;flex-wrap:wrap;' +
-        'font-size:12.5px;color:#334155;background:#EFF6FF;border:1px solid #BFDBFE;' +
-        'border-radius:10px;padding:8px 12px;margin-bottom:16px;}' +
-      '#ti-embed-banner b{color:#1e3a8a;font-weight:700;}' +
-      '#ti-embed-banner .sep{color:#94a3b8;}' +
-      '#ti-embed-banner .via{margin-left:auto;color:#64748b;font-size:11px;}' +
-      '#ti-embed-banner .dot{width:8px;height:8px;border-radius:50%;background:#f59e0b;flex:0 0 auto;}' +
-      '#ti-embed-banner[data-ok="1"] .dot{background:#10b981;}'
+      // 페이지 제목 / update 날짜 숨김 → 콘텐츠만
+      'html[data-embed] .content-title,html[data-embed] #tiUpdate{display:none!important;}' +
+      'html[data-embed] main{padding-top:16px!important;}'
     );
   }
 
   /* ===================== HOST 모드 (myTrial 대역, 최상위) ================== */
   function initHost() {
-    // 1) myTrial처럼 세션 심기: sessionStorage(JS 읽기 가능) + HttpOnly 쿠키(서버)
+    // 1) myTrial처럼 세션 + 쿠키 보유
+    var session = { projectId: 'ST491', userId: 'hgjo@nanumspace.com', jsessionid: null };
     try {
-      sessionStorage.setItem(':SYSTEM:PROJECT:ID', 'ST491');
-      sessionStorage.setItem(':SYSTEM:USER:ID', 'hgjo@nanumspace.com');
+      sessionStorage.setItem(':SYSTEM:PROJECT:ID', session.projectId);
+      sessionStorage.setItem(':SYSTEM:USER:ID', session.userId);
     } catch (e) {}
-    // HttpOnly JSESSIONID 쿠키 세팅(무-env, 실패해도 데모 동작엔 무관)
-    fetch('/api/login', { method: 'POST' }).catch(function () {});
+    // HttpOnly JSESSIONID 쿠키를 심고(브라우저 쿠키함), 그 값도 응답으로 받아 보관
+    // → HttpOnly 라 JS 로 못 읽으므로, iframe 에 넘기려면 이렇게 값을 확보한다.
+    var loginReady = fetch('/api/login', { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { session.jsessionid = d && d.jsessionid; })
+      .catch(function () {});
 
-    // 2) 인사이트용 iframe 패널을 <main>에 추가
+    // 2) 인사이트용 iframe 패널 (iframe 만, 설명글 없음)
     var main = document.querySelector('main');
     var panel = document.createElement('section');
     panel.className = 'panel';
     panel.id = 'panel-tiaddon';
-    panel.innerHTML =
-      '<div id="ti-frame-note">📊 Trial Insight는 <b>다른 도메인</b>(' + ADDON_ORIGIN +
-      ')에서 iframe으로 로드됩니다. myTrial은 세션(projectId · userId)만 postMessage로 전달합니다.</div>' +
-      '<iframe id="ti-addon-frame" title="Trial Insight Addon" src="about:blank"></iframe>';
+    panel.innerHTML = '<iframe id="ti-addon-frame" title="Trial Insight Addon" src="about:blank"></iframe>';
     main.appendChild(panel);
     injectHostCss();
 
     var frame = panel.querySelector('#ti-addon-frame');
 
     function sendSession() {
-      try {
-        frame.contentWindow.postMessage({
-          type: 'TI_SESSION',
-          projectId: sessionStorage.getItem(':SYSTEM:PROJECT:ID'),
-          userId: sessionStorage.getItem(':SYSTEM:USER:ID')
-        }, ADDON_ORIGIN); // 민감 컨텍스트는 특정 origin으로만
-      } catch (e) {}
+      loginReady.then(function () {
+        try {
+          frame.contentWindow.postMessage({
+            type: 'TI_SESSION',
+            projectId: sessionStorage.getItem(':SYSTEM:PROJECT:ID'),
+            userId: sessionStorage.getItem(':SYSTEM:USER:ID'),
+            jsessionid: session.jsessionid   // 쿠키(JSESSIONID) 값 전달
+          }, ADDON_ORIGIN); // 민감 컨텍스트는 특정 origin 으로만
+        } catch (e) {}
+      });
     }
     frame.addEventListener('load', sendSession);
     window.addEventListener('message', function (e) {
@@ -149,48 +138,42 @@
       if (e.data && e.data.type === 'TI_ADDON_READY') sendSession();
     });
 
-    // 3) showPanel 오버라이드: 인사이트 키는 inline 패널 대신 iframe으로 라우팅
+    // 3) showPanel 오버라이드: 인사이트 키는 iframe 만 노출(제목/update 숨김)
     var origShowPanel = window.showPanel;
     window.showPanel = function (key) {
       if (INSIGHT_KEYS.indexOf(key) !== -1) {
         var panels = document.querySelectorAll('.panel');
         for (var i = 0; i < panels.length; i++) panels[i].classList.remove('active');
         panel.classList.add('active');
-        try { setContentTitle(key); } catch (e) {}
-        try { tiUpdate.style.display = ''; } catch (e) {}
-        loadView(key, frame);
-      } else if (typeof origShowPanel === 'function') {
-        origShowPanel(key);
+        main.setAttribute('data-ti-insight', '1'); // 제목/update 숨김 + 스크롤 잠금
+        loadView(key, frame, sendSession);
+      } else {
+        main.removeAttribute('data-ti-insight');
+        if (typeof origShowPanel === 'function') origShowPanel(key);
       }
     };
   }
 
-  function loadView(key, frame) {
+  function loadView(key, frame, sendSession) {
     var sep = ADDON_URL.indexOf('?') === -1 ? '?' : '&';
     var url = ADDON_URL + sep + 'view=' + key;
     if (frame.getAttribute('data-view') !== key) {
       frame.setAttribute('data-view', key);
-      frame.src = url; // load -> sendSession (frame load 리스너)
+      frame.src = url; // load -> sendSession
     } else {
-      try {
-        frame.contentWindow.postMessage({ type: 'TI_VIEW', view: key }, ADDON_ORIGIN);
-        frame.contentWindow.postMessage({
-          type: 'TI_SESSION',
-          projectId: sessionStorage.getItem(':SYSTEM:PROJECT:ID'),
-          userId: sessionStorage.getItem(':SYSTEM:USER:ID')
-        }, ADDON_ORIGIN);
-      } catch (e) {}
+      try { frame.contentWindow.postMessage({ type: 'TI_VIEW', view: key }, new URL(url, location.href).origin); } catch (e) {}
+      sendSession();
     }
   }
 
   function injectHostCss() {
     addCss(
+      // 인사이트 화면: 콘텐츠 영역을 iframe 만으로. 제목/update 숨김, 호스트는 스크롤 없음
+      'main[data-ti-insight]{display:flex!important;flex-direction:column;padding:0!important;overflow:hidden!important;}' +
+      'main[data-ti-insight] .content-title,main[data-ti-insight] #tiUpdate{display:none!important;}' +
       '#panel-tiaddon{display:none;}' +
-      '#panel-tiaddon.active{display:flex!important;flex-direction:column;height:calc(100vh - 160px);min-height:520px;}' +
-      '#ti-frame-note{font-size:12px;color:#475569;background:#F1F5F9;border:1px solid #E2E8F0;' +
-        'border-radius:8px;padding:8px 12px;margin-bottom:12px;}' +
-      '#ti-frame-note b{color:#1e293b;}' +
-      '#ti-addon-frame{flex:1 1 auto;width:100%;border:1px solid #E5E7EB;border-radius:12px;background:#fff;}'
+      'main[data-ti-insight] #panel-tiaddon{display:flex!important;flex:1 1 auto;min-height:0;flex-direction:column;}' +
+      '#ti-addon-frame{flex:1 1 auto;width:100%;border:0;display:block;background:#fff;}'
     );
   }
 
