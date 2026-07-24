@@ -29,7 +29,9 @@
   var HOST_ALLOWLIST = [
     'https://trialinsight-addon-sample-host.vercel.app',
     'http://localhost:3000',
-    'http://127.0.0.1:3000'
+    'http://127.0.0.1:3000',
+    'http://localhost:8080',   // 로컬 Spring Boot(Tomcat) 호스트
+    'http://127.0.0.1:8080'
   ];
   if (qs.get('host')) HOST_ALLOWLIST.push(qs.get('host'));
 
@@ -68,8 +70,29 @@
     // 검증 결과 보관(실전에선 이 값들로 우리 addon 자체 데이터 조회/인증)
     window.__TI_SESSION = { ctx: ctx, origin: origin, valid: valid, checks: { okProj: okProj, okUser: okUser, okSid: okSid } };
     try {
-      console.debug('[TI addon] 세션/쿠키 수신·검증',
+      console.debug('[TI addon] 세션/쿠키 수신·형식검증',
         { origin: origin, projectId: ctx.projectId, userId: ctx.userId, jsessionid: ctx.jsessionid, valid: valid });
+    } catch (e) {}
+    // 서버측 검증(실전 Spring): 받은 JSESSIONID를 호스트 서버에 확인 요청.
+    // (myTrial이 Spring이면 이 엔드포인트+CORS 필요. 없으면 조용히 넘어가고 postMessage만으로 동작.)
+    if (ctx.apiBase) serverValidate(ctx);
+  }
+
+  function serverValidate(ctx) {
+    try {
+      fetch(ctx.apiBase + '/api/session/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsessionid: ctx.jsessionid })
+      })
+        .then(function (r) { return r.ok ? r.json() : Promise.reject('HTTP ' + r.status); })
+        .then(function (d) {
+          console.debug('[TI addon] 서버 세션검증 응답(Spring HttpSession)', d);
+          if (window.__TI_SESSION) window.__TI_SESSION.server = d;
+        })
+        .catch(function (err) {
+          console.debug('[TI addon] 서버 세션검증 미지원/실패 — postMessage 형식검증만으로 동작', String(err));
+        });
     } catch (e) {}
   }
 
@@ -127,7 +150,8 @@
             type: 'TI_SESSION',
             projectId: sessionStorage.getItem(':SYSTEM:PROJECT:ID'),
             userId: sessionStorage.getItem(':SYSTEM:USER:ID'),
-            jsessionid: session.jsessionid   // 쿠키(JSESSIONID) 값 전달
+            jsessionid: session.jsessionid,  // 쿠키(JSESSIONID) 값 전달
+            apiBase: location.origin          // addon이 서버측 세션검증을 호출할 base
           }, ADDON_ORIGIN); // 민감 컨텍스트는 특정 origin 으로만
         } catch (e) {}
       });
