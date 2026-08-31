@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>iframe 높이 데모 — 자식(Trial Insight)</title>
+<style>
+  :root { --line:#e3e8ef; --muted:#6b7684; --bad:#c0392b; --ok:#1a7f4b; --accent:#2b6cb0; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; }
+  /* 기본(fill): 주어진 창 크기에 우리 콘텐츠를 스크롤로 접는다 */
+  body { height:100vh; overflow-y:auto; background:#fff; color:#222;
+         font:14px/1.65 "Malgun Gothic","맑은 고딕",system-ui,sans-serif; }
+  /* auto: 내부 스크롤을 끄고 문서가 콘텐츠만큼 길어진다 (부모가 iframe을 늘려줘야 보인다) */
+  html.auto, html.auto body { height:auto; overflow:hidden; }
+
+  #wrap { padding:16px 20px 30px; }
+  h1 { margin:0 0 4px; font-size:16px; }
+  h2 { margin:22px 0 8px; font-size:14px; color:var(--accent); }
+  p  { margin:6px 0; }
+  .sub { color:var(--muted); font-size:12px; margin-bottom:14px; word-break:break-all; }
+
+  /* 계기판 — 이 데모의 핵심. 두 숫자의 괴리가 곧 배울 내용이다 */
+  .gauge { display:grid; grid-template-columns:repeat(3,1fr); gap:1px; background:var(--line);
+           border:1px solid var(--line); border-radius:8px; overflow:hidden; margin-bottom:10px; }
+  .gauge div { background:#fafbfc; padding:9px 12px; }
+  .gauge .k { font-size:11px; color:var(--muted); }
+  .gauge .v { font-size:19px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .verdict { padding:9px 12px; border-radius:8px; font-weight:700; font-size:13px; margin-bottom:16px; }
+  .verdict.ok  { background:#e8f6ee; color:var(--ok);  border:1px solid #b7e0c8; }
+  .verdict.bad { background:#fdecea; color:var(--bad); border:1px solid #f3c1bb; }
+
+  button { font:inherit; padding:7px 12px; margin:0 6px 6px 0; cursor:pointer;
+           border:1px solid #cfd6df; border-radius:6px; background:#fff; }
+  button:hover { background:#f2f5f8; }
+  button.no { border-color:#e6b9b3; color:var(--bad); }
+  button.yes { border-color:#a9cbe8; color:var(--accent); font-weight:600; }
+
+  code { background:#f1f3f6; padding:1px 5px; border-radius:4px; font-size:12.5px; }
+  .log { background:#1e2430; color:#d6dde8; border-radius:8px; padding:10px 12px; margin-top:8px;
+         font:12px/1.6 Consolas,monospace; white-space:pre-wrap; min-height:64px; max-height:180px; overflow:auto; }
+  .log .e { color:#ff9a8f; } .log .g { color:#8fe0a8; } .log .d { color:#8aa0b8; }
+  .rows { border:1px solid var(--line); border-radius:8px; margin-top:8px; }
+  .rows div { padding:9px 12px; border-top:1px solid var(--line); font-size:13px; }
+  .rows div:first-child { border-top:0; }
+  .note { background:#fff8e6; border:1px solid #f0dfae; border-radius:8px; padding:10px 12px; font-size:13px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+
+  <h1>여기는 iframe <u>안쪽</u> — Trial Insight 가 구현하는 화면</h1>
+  <div class="sub">내 origin: <b id="myOrigin"></b> · 부모 origin: <b id="parentOrigin">(아직 모름)</b></div>
+
+  <div class="gauge">
+    <div><div class="k">콘텐츠가 필요로 하는 높이</div><div class="v" id="gContent">–</div></div>
+    <div><div class="k">실제 iframe 창 높이 (innerHeight)</div><div class="v" id="gWindow">–</div></div>
+    <div><div class="k">부모에게 마지막으로 통보한 값</div><div class="v" id="gSent">–</div></div>
+  </div>
+  <div class="verdict ok" id="verdict"></div>
+
+  <h2>1. 우리가 iframe 높이를 직접 바꿔볼 수 있나? (전부 실패합니다)</h2>
+  <p>아래 버튼은 자식 화면에서 iframe 크기를 스스로 키우려는 시도들입니다. 실제 브라우저 반응을 그대로 찍습니다.</p>
+  <button class="no" onclick="tryFrameElement()">① frameElement.style.height 변경</button>
+  <button class="no" onclick="tryParentDom()">② parent.document 에서 iframe 찾기</button>
+  <button class="no" onclick="tryResizeTo()">③ window.resizeTo()</button>
+  <button class="no" onclick="tryOwnDoc()">④ 내 문서 높이를 1600px 로</button>
+  <div class="log" id="log"><span class="d">버튼을 눌러보세요.</span></div>
+
+  <h2>2. 되는 방법 — 부모에게 "통보"하기</h2>
+  <p>우리가 할 수 있는 건 <code>postMessage</code> 로 필요한 높이를 알려주는 것까지입니다.
+     <b>실제로 <code>iframe.style.height</code> 를 실행하는 주체는 부모(myTrial)</b>입니다.</p>
+  <button class="yes" onclick="sendHeight(true)">TI_HEIGHT 보내기</button>
+  <button onclick="addRows(6)">콘텐츠 늘리기 (+6줄)</button>
+  <button onclick="resetRows()">콘텐츠 초기화</button>
+  <div class="note">부모 화면에서 <b>“TI_HEIGHT 무시”</b> 를 켠 채 눌러보세요. 우리가 아무리 정확히 보내도
+     iframe 은 꿈쩍하지 않습니다. 높이의 결정권이 우리에게 없다는 뜻입니다.</div>
+
+  <h2>3. auto / fill 차이</h2>
+  <p>부모가 보내는 <code>TI_MODE</code> 를 받아 우리가 전환합니다. 부모 화면의 auto/fill 버튼을 눌러 비교해 보세요.</p>
+  <div class="rows">
+    <div><b>fill</b> — 내부 스크롤 <b>있음</b>. 주어진 창에 콘텐츠를 접어 넣음. 높이 통보 안 함.</div>
+    <div><b>auto</b> — 내부 스크롤 <b>없음</b>. 콘텐츠 전체 높이를 통보하고 부모가 iframe 을 늘려줌.</div>
+    <div><b>auto 인데 부모가 안 늘려주면</b> → 스크롤이 없으므로 하단이 <b>잘려서 접근 불가</b>. 그래서 안전망이 필요.</div>
+  </div>
+
+  <h2>4. 안전망 (fill 자동 복귀)</h2>
+  <p>보낸 높이를 부모가 반영했는지는 <code>window.innerHeight</code> 로 확인할 수 있습니다(내 창 정보라 읽기는 가능).
+     어긋나면 내부 스크롤을 되살려 콘텐츠가 잘리지 않게 합니다.</p>
+  <button onclick="watchdog(true)">안전망 지금 판정</button>
+
+  <div id="rows"></div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var HOST_ALLOWLIST = [
+    'https://trialinsight-addon-sample-host.vercel.app',
+    'http://localhost:3000', 'http://127.0.0.1:3000'
+  ];
+  var qs = new URLSearchParams(location.search);
+  if (qs.get('host')) HOST_ALLOWLIST.push(qs.get('host'));
+
+  var hostOrigin = null;      // TI_MODE 를 받은 시점에 확정
+  var mode = 'fill';
+  var lastSent = 0;
+  var wrap = document.getElementById('wrap');
+
+  document.getElementById('myOrigin').textContent = location.origin;
+
+  /* ---------- 부모 메시지 수신 ---------- */
+  window.addEventListener('message', function (e) {
+    if (HOST_ALLOWLIST.indexOf(e.origin) === -1) return;   // origin 검증
+    if (!e.data || e.data.type !== 'TI_MODE') return;
+    hostOrigin = e.origin;
+    document.getElementById('parentOrigin').textContent = e.origin;
+    setMode(e.data.mode);
+  });
+
+  function setMode(m) {
+    if (m !== 'auto' && m !== 'fill') return;
+    mode = m;
+    document.documentElement.classList.toggle('auto', m === 'auto');
+    log('모드 → ' + m, 'g');   // 모드 표시는 paint() 가 verdict 에 그린다
+    // 모드 전환 시엔 값이 같아도 반드시 재통보한다.
+    // (부모가 그 사이 iframe 높이를 되돌렸을 수 있어 lastSent 를 믿을 수 없다)
+    if (m === 'auto') sendHeight(true);
+    paint();
+  }
+
+  /* ---------- 높이 통보 ---------- */
+  function contentHeight() { return wrap.offsetHeight; }   // 모드와 무관하게 항상 정확
+
+  function sendHeight(manual) {
+    var h = contentHeight();
+    if (!hostOrigin) { log('부모 origin 미확정 — 부모 화면에서 auto/fill 을 한 번 눌러주세요.', 'e'); return; }
+    if (!manual && Math.abs(h - lastSent) < 4) return;      // 같은 값 재전송 안 함
+    lastSent = h;
+    parent.postMessage({ type: 'TI_HEIGHT', height: h }, hostOrigin);
+    log('→ postMessage TI_HEIGHT ' + h + 'px  (적용 여부는 부모가 결정)', 'g');
+    paint();
+  }
+
+  /* 콘텐츠 변화 추적 (debounce) */
+  var t;
+  new ResizeObserver(function () {
+    paint();
+    if (mode !== 'auto') return;
+    clearTimeout(t); t = setTimeout(function () { sendHeight(false); }, 50);
+  }).observe(wrap);
+
+  /* ---------- 안전망 ---------- */
+  // ponytail: 수동/2초 1회 판정. 지연 로드가 길어 오판되면 주기 검사로 올린다.
+  function watchdog(manual) {
+    if (mode !== 'auto' || !lastSent) {
+      if (manual) log('판정 대상 아님 (auto 이고 통보 이력이 있어야 함)', 'd');
+      return;
+    }
+    var gap = Math.abs(window.innerHeight - lastSent);
+    if (gap > 40) {
+      log('부모 미반영 감지 (통보 ' + lastSent + ' vs 창 ' + window.innerHeight + ') → fill 복귀', 'e');
+      setMode('fill');
+    } else if (manual) {
+      log('정상 — 부모가 높이를 반영하고 있습니다.', 'g');
+    }
+  }
+  window.watchdog = watchdog;
+
+  /* ---------- 금지된 시도들 ---------- */
+  window.tryFrameElement = function () {
+    try {
+      window.frameElement.style.height = '1200px';
+      log('① 성공?! — 같은 origin 이라는 뜻입니다. 실전(다른 도메인)에서는 불가합니다.', 'e');
+    } catch (err) { log('① 실패 — ' + err.name + ': ' + err.message, 'e'); }
+  };
+  window.tryParentDom = function () {
+    try {
+      var f = window.parent.document.querySelector('iframe');
+      log('② 성공?! — 같은 origin. 실전에서는 불가합니다. ' + f, 'e');
+    } catch (err) { log('② 실패 — ' + err.name + ': ' + err.message, 'e'); }
+  };
+  window.tryResizeTo = function () {
+    var before = window.innerHeight;
+    window.resizeTo(window.innerWidth, 1200);              // 에러도 안 나고, 아무 일도 없다
+    log('③ 에러 없음. 그런데 창 높이 ' + before + ' → ' + window.innerHeight +
+        ' (변화 없음). resizeTo 는 최상위 창 전용이라 iframe 에서는 무시됩니다.', 'e');
+  };
+  window.tryOwnDoc = function () {
+    document.documentElement.style.height = '1600px';
+    log('④ 내 문서만 1600px 이 됐습니다. 창 높이는 여전히 ' + window.innerHeight +
+        ' — 넘친 부분은 iframe 안에서 스크롤될 뿐 바깥으로 밀려나지 않습니다.', 'e');
+    setTimeout(function () { document.documentElement.style.height = ''; paint(); }, 2500);
+  };
+
+  /* ---------- 콘텐츠 조작 ---------- */
+  var extra = 0;
+  window.addRows = function (n) {
+    var box = document.getElementById('rows');
+    for (var i = 0; i < n; i++) {
+      var d = document.createElement('div');
+      d.className = 'note';
+      d.style.marginTop = '8px';
+      d.textContent = '추가된 콘텐츠 행 #' + (++extra) + ' — 실제 화면에서는 ePRO 매트릭스 같은 긴 표에 해당합니다.';
+      box.appendChild(d);
+    }
+  };
+  window.resetRows = function () { document.getElementById('rows').innerHTML = ''; extra = 0; };
+
+  /* ---------- 계기판 ---------- */
+  function paint() {
+    var c = contentHeight(), w = window.innerHeight;
+    document.getElementById('gContent').textContent = c + 'px';
+    document.getElementById('gWindow').textContent  = w + 'px';
+    document.getElementById('gSent').textContent    = lastSent ? lastSent + 'px' : '–';
+    var v = document.getElementById('verdict');
+    var cut = (mode === 'auto' && c - w > 40);
+    v.className = 'verdict ' + (cut ? 'bad' : 'ok');
+    v.innerHTML = '현재 모드: <b>' + mode + '</b> — ' + (
+      cut ? '⚠ 콘텐츠가 창보다 ' + (c - w) + 'px 큽니다. auto 라 내부 스크롤이 없어 <b>하단이 잘립니다</b>.'
+      : mode === 'auto' ? '부모가 높이를 따라오고 있습니다.'
+      : '내부 스크롤로 전부 볼 수 있습니다.'
+    );
+  }
+  window.addEventListener('resize', paint);
+  setInterval(function () { paint(); watchdog(false); }, 2000);
+
+  function log(msg, cls) {
+    var el = document.getElementById('log');
+    if (!el.dataset.used) { el.innerHTML = ''; el.dataset.used = '1'; }
+    var s = document.createElement('span');
+    s.className = cls || 'd';
+    s.textContent = msg + '\n';
+    el.appendChild(s);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  paint();
+})();
+</script>
+</body>
+</html>
